@@ -3,12 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Finance & Fitness Tracker</title>
+  <title>Tracker (PyScript)</title>
+
+  <!-- PyScript (loads Pyodide behind the scenes) -->
+  <link rel="stylesheet" href="https://pyscript.net/latest/pyscript.css" />
+  <script defer src="https://pyscript.net/latest/pyscript.js"></script>
+
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main>
-    <h1>Finance & Fitness Tracker</h1>
+    <h1>Finance & Fitness Tracker (Python via PyScript)</h1>
 
     <div id="menu" class="panel">
       <button id="btnProfile">1. Set Up / Update Profile</button>
@@ -26,10 +31,261 @@
     </section>
 
     <footer class="panel small">
-      <p>Data is stored in your browser (localStorage). Export to keep backups. Hosted on GitHub Pages as a static site.</p>
+      <p>Everything runs in your browser (Pyodide). Data is saved to localStorage. Use Export to back up.</p>
     </footer>
   </main>
 
-  <script src="app.js"></script>
+  <!-- Python code runs in the browser via PyScript -->
+  <py-script>
+from js import document, localStorage, window, console
+from pyodide.ffi import create_proxy
+import json
+from datetime import date
+
+STORAGE_KEY = "tracker_db_v1"
+
+def today_iso():
+    return date.today().isoformat()
+
+def default_db():
+    return {"profile": None, "finance_entries": [], "workouts": []}
+
+def load_db():
+    raw = localStorage.getItem(STORAGE_KEY)
+    if raw is None:
+        return default_db()
+    try:
+        return json.loads(raw)
+    except Exception as e:
+        console.log("Failed to parse DB:", e)
+        return default_db()
+
+def save_db(db):
+    localStorage.setItem(STORAGE_KEY, json.dumps(db))
+
+def append_log(msg):
+    log = document.getElementById("log")
+    t = window.Date().toLocaleTimeString()
+    log.textContent = f"[{t}] {msg}\n\n" + log.textContent
+
+# Finance functions (port of finance.py)
+def add_income(category, amount):
+    db = load_db()
+    db["finance_entries"].append({"date": today_iso(), "entry_type": "income", "category": category, "amount": float(amount)})
+    save_db(db)
+
+def add_expense(category, amount):
+    db = load_db()
+    db["finance_entries"].append({"date": today_iso(), "entry_type": "expense", "category": category, "amount": float(amount)})
+    save_db(db)
+
+def monthly_summary(year, month):
+    db = load_db()
+    prefix = f"{year:04d}-{month:02d:}"
+    # careful: formatting month as two digits
+    prefix = f"{year:04d}-{str(month).zfill(2)}"
+    rows = [r for r in db["finance_entries"] if r["date"].startswith(prefix)]
+    income = sum(float(r["amount"]) for r in rows if r["entry_type"] == "income")
+    expense = sum(float(r["amount"]) for r in rows if r["entry_type"] == "expense")
+    return {"income": income, "expense": expense, "net": income - expense, "entries": rows}
+
+# Fitness functions (port of fitness.py)
+CALORIES_PER_REP_AT_70KG = {
+    "Push-ups": 0.30, "Squats": 0.32, "Pull-ups": 1.00, "Burpees": 0.50,
+    "Lunges": 0.30, "Bench Press": 0.40, "Bicep Curls": 0.15, "Shoulder Press": 0.25,
+    "Tricep Dips": 0.30, "Deadlifts": 0.50, "Leg Press": 0.40, "Calf Raises": 0.10
+}
+CALORIES_PER_SECOND_PLANK_AT_70KG = 0.05
+
+PRESETS = {
+  "Calisthenics - Beginner": {"Push-ups": 15, "Squats": 20, "Lunges": 10, "Plank (seconds)": 30},
+  "Calisthenics - Intermediate": {"Push-ups": 25, "Pull-ups": 8, "Squats": 30, "Burpees": 15},
+  "Bodybuilding - Upper Body": {"Bench Press": 10, "Bicep Curls": 12, "Shoulder Press": 10, "Tricep Dips": 12},
+  "Bodybuilding - Lower Body": {"Squats": 12, "Deadlifts": 10, "Leg Press": 12, "Calf Raises": 15}
+}
+
+def estimate_calories(exercise, reps, weight_kg):
+    per_unit = CALORIES_PER_SECOND_PLANK_AT_70KG if exercise == "Plank (seconds)" else CALORIES_PER_REP_AT_70KG.get(exercise, 0.25)
+    return round(per_unit * reps * (weight_kg / 70), 1)
+
+def get_last_deficit(exercise):
+    db = load_db()
+    list_ = [w for w in db["workouts"] if w["exercise"] == exercise]
+    if not list_:
+        return 0
+    last = list_[-1]
+    deficit = float(last["planned_reps"]) - float(last["completed_reps"])
+    return deficit if deficit > 0 else 0
+
+def log_workout(exercise, planned_reps, completed_reps, weight_kg):
+    calories = estimate_calories(exercise, completed_reps, weight_kg)
+    db = load_db()
+    db["workouts"].append({
+        "date": today_iso(),
+        "exercise": exercise,
+        "planned_reps": float(planned_reps),
+        "completed_reps": float(completed_reps),
+        "calories_burned": float(calories)
+    })
+    save_db(db)
+    fully_met = float(completed_reps) >= float(planned_reps)
+    return {"calories": calories, "fully_met": fully_met}
+
+# UI functions mirror main.py prompt flow
+def setup_profile(_ev=None):
+    db = load_db()
+    name = window.prompt("Enter your name:", db["profile"]["name"] if db["profile"] else "")
+    if name is None:
+        return
+    try:
+        age = int(window.prompt("Enter your age:", db["profile"]["age"] if db["profile"] else ""))
+        weight = float(window.prompt("Enter your weight (kg):", db["profile"]["weight_kg"] if db["profile"] else ""))
+        height = float(window.prompt("Enter your height (cm):", db["profile"]["height_cm"] if db["profile"] else ""))
+    except Exception:
+        window.alert("Invalid numeric input")
+        return
+    gender = window.prompt("Enter your gender (M/F):", db["profile"]["gender"] if db["profile"] else "")
+    db["profile"] = {"name": name, "age": age, "weight_kg": weight, "height_cm": height, "gender": gender}
+    save_db(db)
+    append_log("Profile saved.")
+
+def log_salary(_ev=None):
+    try:
+        amount = float(window.prompt("Enter salary amount:"))
+    except Exception:
+        window.alert("Invalid amount")
+        return
+    add_income("Salary", amount)
+    append_log(f"Salary logged: {amount:.2f}")
+
+def log_utility(_ev=None):
+    name = window.prompt("Utility name (e.g. Electricity):", "Electricity")
+    if name is None: return
+    try:
+        amount = float(window.prompt("Amount:"))
+    except Exception:
+        window.alert("Invalid amount")
+        return
+    add_expense(f"Utility - {name}", amount)
+    append_log(f"Utility expense logged: {name} {amount:.2f}")
+
+def view_finance_summary(_ev=None):
+    today = date.today()
+    s = monthly_summary(today.year, today.month)
+    text = f"===== FINANCE SUMMARY ({today.year}-{str(today.month).zfill(2)}) =====\n"
+    text += f"Total Income  : {s['income']:.2f}\nTotal Expense : {s['expense']:.2f}\nNet           : {s['net']:.2f}\n\nEntries:\n"
+    if not s["entries"]:
+        text += "  (no entries)\n"
+    else:
+        for e in s["entries"]:
+            text += f"  {e['date']} {e['entry_type']} {e['category']} {float(e['amount']):.2f}\n"
+    append_log(text)
+
+def log_single_exercise(_ev=None):
+    db = load_db()
+    if not db["profile"]:
+        append_log("Please set up your profile first (menu option 1).")
+        return
+    weight = float(db["profile"]["weight_kg"])
+    exercise = window.prompt("Exercise name:", "Push-ups")
+    if exercise is None: return
+    try:
+        planned = float(window.prompt("Planned reps (or seconds for planks):", "10"))
+    except Exception:
+        window.alert("Invalid planned")
+        return
+    deficit = get_last_deficit(exercise)
+    if deficit > 0:
+        if window.confirm(f"Note: last session was short by {deficit} — add to today's target?"):
+            planned += deficit
+    try:
+        completed = float(window.prompt(f"Completed (target is now {planned}):", str(planned)))
+    except Exception:
+        window.alert("Invalid completed")
+        return
+    res = log_workout(exercise, planned, completed, weight)
+    append_log(f"Logged {exercise}. Estimated calories burned: {res['calories']}. {'Target met!' if res['fully_met'] else f'Short by {planned-completed}'}")
+
+def log_preset_routine(_ev=None):
+    db = load_db()
+    if not db["profile"]:
+        append_log("Please set up your profile first (menu option 1).")
+        return
+    weight = float(db["profile"]["weight_kg"])
+    names = list(PRESETS.keys())
+    prompt_list = "Available presets:\n" + "\n".join([f"{i+1}. {n}" for i,n in enumerate(names)]) + "\nChoose a preset number:"
+    try:
+        choice = int(window.prompt(prompt_list, "1"))
+    except Exception:
+        window.alert("Invalid choice")
+        return
+    if not (1 <= choice <= len(names)):
+        window.alert("Invalid choice")
+        return
+    chosen = names[choice-1]
+    append_log(f"--- {chosen} ---")
+    routine = PRESETS[chosen]
+    for exercise, base in routine.items():
+        deficit = get_last_deficit(exercise)
+        target = base + (deficit if deficit>0 else 0)
+        if deficit > 0:
+            append_log(f"({exercise}: base target {base}, +{deficit} carried over)")
+        try:
+            completed = float(window.prompt(f"{exercise} - target {target}, completed:", str(target)))
+        except Exception:
+            window.alert("Invalid completed")
+            return
+        res = log_workout(exercise, target, completed, weight)
+        status = "target met" if res["fully_met"] else f"short by {target - completed}"
+        append_log(f"  -> {exercise}: {res['calories']} kcal burned, {status}")
+
+# Import/export
+def export_db(_ev=None):
+    db = load_db()
+    text = json.dumps(db, indent=2)
+    blob = window.Blob.new([text], {"type":"application/json"})
+    url = window.URL.createObjectURL(blob)
+    a = document.createElement("a")
+    a.href = url
+    a.download = f"tracker-db-{window.Date().toISOString().slice(0,10)}.json"
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.URL.revokeObjectURL(url)
+    append_log("Exported DB as JSON.")
+
+def import_db(_ev=None):
+    # Create input element to pick file
+    inp = document.createElement("input")
+    inp.type = "file"
+    inp.accept = ".json,application/json"
+    def _on_change(ev):
+        file = ev.target.files.item(0)
+        reader = window.FileReader.new()
+        def _on_load(e):
+            try:
+                obj = json.loads(e.target.result)
+                save_db(obj)
+                append_log("DB imported successfully.")
+            except Exception as ex:
+                window.alert("Import failed: " + str(ex))
+        reader.onload = _on_load
+        reader.readAsText(file)
+    inp.onchange = _on_change
+    inp.click()
+
+# Wire buttons to Python functions using proxies
+document.getElementById("btnProfile").addEventListener("click", create_proxy(setup_profile))
+document.getElementById("btnSalary").addEventListener("click", create_proxy(log_salary))
+document.getElementById("btnUtility").addEventListener("click", create_proxy(log_utility))
+document.getElementById("btnSummary").addEventListener("click", create_proxy(view_finance_summary))
+document.getElementById("btnSingle").addEventListener("click", create_proxy(log_single_exercise))
+document.getElementById("btnPreset").addEventListener("click", create_proxy(log_preset_routine))
+document.getElementById("btnExport").addEventListener("click", create_proxy(export_db))
+document.getElementById("btnImport").addEventListener("click", create_proxy(import_db))
+
+append_log("PyScript tracker ready. Use buttons to interact.")
+  </py-script>
+
 </body>
 </html>
